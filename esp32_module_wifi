@@ -1,0 +1,68 @@
+#define BLYNK_TEMPLATE_ID "TMPL6gInHaYIO"
+#define BLYNK_TEMPLATE_NAME "gas detector"
+#define BLYNK_AUTH_TOKEN "Ki2E5riPz-9vAQR1cgSqcO9_3LTAQsbc"
+
+#include <WiFi.h>
+#include <BlynkSimpleEsp32.h>
+
+char ssid[] = "P302"; // Thay bằng SSID của Wifi muốn kết nối
+char pass[] = "66668888"; // Thay bằng mật khẩu của Wifi muốn kết nối
+
+HardwareSerial stm32(2);
+
+uint8_t last_alert_level = 0;  // 0: none, 1: >700, 2: >750, 3: >800
+
+void send_alert(uint8_t level) {
+  if (level != last_alert_level) {
+    switch (level) {
+      case 1:
+        Blynk.logEvent("gas_detected");
+        break;
+      case 2:
+        Blynk.logEvent("high_value");
+        break;
+      case 3:
+        Blynk.logEvent("very_high_value");
+        break;
+    }
+    last_alert_level = level;
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  stm32.begin(9600, SERIAL_8N1, 16, -1);  
+
+  Blynk.begin(BLYNK_AUTH_TOKEN, ssid, pass);
+
+  Serial.println("ESP32 đang chờ dữ liệu từ STM32...");
+}
+
+void loop() {
+  Blynk.run();
+
+  if (stm32.available()) {
+    String adc_str = stm32.readStringUntil('\n');
+    adc_str.trim();
+
+    int adc_val = adc_str.toInt();
+
+    if (adc_val >= 0 && adc_val <= 1023) {
+      Blynk.virtualWrite(V0, adc_val);
+      Serial.println("ADC: " + String(adc_val));
+
+      if (adc_val > 800) {
+        send_alert(3);
+      } else if (adc_val > 750) {
+        send_alert(2);
+      } else if (adc_val > 700) {
+        send_alert(1);
+      } else {
+        last_alert_level = 0;  // reset nếu giá trị về lại an toàn
+      }
+
+    } else {
+      Serial.println("ADC không hợp lệ: " + adc_str);
+    }
+  }
+}
