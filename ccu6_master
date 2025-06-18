@@ -1,0 +1,235 @@
+#include "stm32f4xx.h"
+
+volatile char current_mode = '0';
+volatile uint8_t led_state = 0;
+volatile uint8_t system_on = 1;
+#define RELAY_PIN (1 << 5)  // Chân PB4 điều khiển relay
+#define BUZZER_PIN (1 << 5)  // PA5
+
+
+
+void set_led(uint8_t blue, uint8_t yellow, uint8_t red) {
+    GPIOB->ODR = (blue << 0) | (yellow << 1) | (red << 2);
+}
+
+void set_led_green(uint8_t on) {
+    if (on)
+        GPIOB->ODR |=  (1 << 3);  
+    else
+        GPIOB->ODR &= ~(1 << 3);  
+}
+
+void gpio_init(void) {
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOBEN;
+
+    GPIOB->MODER &= ~((3 << (0*2)) | (3 << (1*2)) | (3 << (2*2)) | (3 << (3*2)));
+    GPIOB->MODER |=  ((1 << (0*2)) | (1 << (1*2)) | (1 << (2*2)) | (1 << (3*2)));
+
+    GPIOB->MODER &= ~(3 << (5 * 2));
+    GPIOB->MODER |=  (1 << (5 * 2));  
+    GPIOB->ODR   |=  RELAY_PIN;      
+
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN;
+    GPIOA->MODER &= ~(3 << (5 * 2));
+    GPIOA->MODER |=  (1 << (5 * 2));  
+    GPIOA->ODR   &= ~BUZZER_PIN;      
+}
+
+void buzzer_on(void) {
+    GPIOA->ODR |= BUZZER_PIN;
+}
+
+void buzzer_off(void) {
+    GPIOA->ODR &= ~BUZZER_PIN;
+}
+
+
+void relay_on() {
+    GPIOB->ODR &= ~RELAY_PIN;  
+}
+
+void relay_off() {
+    GPIOB->ODR |= RELAY_PIN;   
+}
+
+
+void uart2_send_string(const char *s) {
+    while (*s) {
+        while (!(USART2->SR & USART_SR_TXE));
+        USART2->DR = *s++;
+    }
+}
+
+void uart2_init(void) {
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN;
+    RCC->APB1ENR |= RCC_APB1ENR_USART2EN;
+
+    GPIOA->MODER &= ~((3 << (2*2)) | (3 << (3*2)));
+    GPIOA->MODER |=  (2 << (2*2)) | (2 << (3*2));
+    GPIOA->AFR[0] |= (7 << (2*4)) | (7 << (3*4));
+
+    USART2->BRR = 16000000 / 9600;
+    USART2->CR1 |= USART_CR1_RE | USART_CR1_TE | USART_CR1_RXNEIE | USART_CR1_UE;
+    NVIC_EnableIRQ(USART2_IRQn);
+}
+
+void tim3_init(void) {
+    RCC->APB1ENR |= RCC_APB1ENR_TIM3EN;
+    TIM3->PSC = 16000 - 1;  
+    TIM3->ARR = 500;        
+    TIM3->DIER |= TIM_DIER_UIE;
+    TIM3->CR1 |= TIM_CR1_CEN;
+    NVIC_EnableIRQ(TIM3_IRQn);
+}
+
+void update_tim3_frequency(uint32_t period_ms) {
+    TIM3->ARR = period_ms;
+    TIM3->CNT = 0;
+}
+
+void switch_init(void) {
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOCEN;
+    RCC->APB2ENR |= RCC_APB2ENR_SYSCFGEN;
+
+    GPIOC->MODER &= ~(3 << (13 * 2));
+    GPIOC->PUPDR &= ~(3 << (13 * 2));
+    GPIOC->PUPDR |=  (1 << (13 * 2));
+
+    SYSCFG->EXTICR[3] &= ~(0xF << 4);
+    SYSCFG->EXTICR[3] |=  (2 << 4);  
+
+    EXTI->IMR  |= EXTI_IMR_MR13;
+    EXTI->FTSR |= EXTI_FTSR_TR13;
+    EXTI->RTSR |= EXTI_RTSR_TR13;
+
+    NVIC_EnableIRQ(EXTI15_10_IRQn);
+}
+
+void EXTI15_10_IRQHandler(void) {
+    if (EXTI->PR & EXTI_PR_PR13) {
+        EXTI->PR = EXTI_PR_PR13;
+        for (volatile int i = 0; i < 200000; i++);  
+
+        if ((GPIOC->IDR & (1 << 13)) == 0) {
+            if (!system_on) {
+                system_on = 1;
+                set_led(1, 0, 0);
+                set_led_green(0);
+                buzzer_off();
+                uart2_send_string("I\r\n");
+            }
+        } else {
+            if (system_on) {
+                system_on = 0;
+                set_led(0, 0, 0);
+                set_led_green(1);
+                buzzer_off();
+                uart2_send_string("O\r\n");
+            }
+        }
+    }
+}
+
+void USART2_IRQHandler(void) {
+    if (system_on && (USART2->SR & USART_SR_RXNE)) {
+        char c = USART2->DR;
+        current_mode = c;
+
+        switch (c) {
+            case '0':
+                set_led(1, 0, 0);
+                relay_off();
+                buzzer_off();
+                break;
+            case '1':
+                set_led(0, 1, 0);
+                relay_off();
+                buzzer_off();
+                break;
+            case '2':
+                update_tim3_frequency(500);
+                relay_on();
+                buzzer_on();  
+                break;
+            case '3':
+                update_tim3_frequency(250);
+                relay_on();
+                buzzer_on();  
+                break;
+            default:
+                set_led(1, 0, 0);
+                relay_off();
+                buzzer_off();
+                break;
+        }
+
+    }
+}
+
+void TIM3_IRQHandler(void) {
+    if (system_on && (TIM3->SR & TIM_SR_UIF)) {
+        TIM3->SR &= ~TIM_SR_UIF;
+
+        switch (current_mode) {
+            case '2':
+                led_state = !led_state;
+                set_led(0, 0, led_state);
+                break;
+
+            case '3': {
+                static int hz = 2;
+                led_state = !led_state;
+                set_led(0, 0, led_state);
+                if (!led_state) {
+                    hz++;
+                    if (hz > 10) hz = 2;
+                    update_tim3_frequency(500 / hz);
+                }
+                break;
+            }
+
+            default:
+                break;
+        }
+    }
+}
+
+void check_switch_status_on_boot(void) {
+    if (GPIOC->IDR & (1 << 13)) {
+        system_on = 0;
+        set_led(0, 0, 0);
+        set_led_green(1);
+        uart2_send_string("O\r\n");
+
+    } else {
+        system_on = 1;
+        set_led(1, 0, 0);
+        set_led_green(0);
+        uart2_send_string("I\r\n");
+
+    }
+}
+
+int main(void) {
+    gpio_init();
+    uart2_init();
+    tim3_init();
+    switch_init();
+
+    check_switch_status_on_boot();
+
+    while (1) {
+        __disable_irq();
+        int uart_ready  = (USART2->SR & USART_SR_RXNE);
+        int timer_ready = (TIM3->SR & TIM_SR_UIF);
+        int exti_ready  = (EXTI->PR & EXTI_PR_PR13);
+        __enable_irq();
+
+        if (system_on) {
+            if (!uart_ready && !timer_ready && !exti_ready) {
+                __WFI();  
+            }
+        }
+
+    }
+}
